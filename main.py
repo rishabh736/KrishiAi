@@ -21,7 +21,7 @@ app.add_middleware(
 
 # --- SAFE CONFIGURATION LOADER ---
 # This prevents the app from crashing if keys are missing
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_KEY = os.environ.get("AIzaSyDtR5bheAVr4uCogM9em_fbx4Gb-nXb868")
 SHEETS_JSON = os.environ.get("GOOGLE_SHEETS_JSON")
 
 # 2. Init Gemini
