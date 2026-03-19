@@ -1,47 +1,87 @@
 import os
 import json
-from fastapi import FastAPI, HTTPException
+import httpx
+import datetime
+import gspread
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from oauth2client.service_account import ServiceAccountCredentials
+import google.generativeai as genai
 
-# Initialize the FastAPI app
-app = FastAPI(title="Baranaja AI Backend")
+app = FastAPI()
 
-# Setup CORS to allow your HTML/JS frontend to communicate with this backend
-# For the hackathon, we allow all origins ("*"). In production, put your frontend URL here.
+# 1. CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Define the expected data structure from your frontend
-class FarmLocation(BaseModel):
-    latitude: float
-    longitude: float
+# --- SAFE CONFIGURATION LOADER ---
+# This prevents the app from crashing if keys are missing
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+SHEETS_JSON = os.environ.get("GOOGLE_SHEETS_JSON")
 
-# A sample endpoint to test the connection and return data
-@app.post("/api/predict-yield")
-async def predict_yield(location: FarmLocation):
+# 2. Init Gemini
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    model = None
+    print("⚠️ WARNING: GEMINI_API_KEY missing!")
+
+# 3. Init Google Sheets
+db_sheet = None
+if SHEETS_JSON:
     try:
-        # Since Earth Engine is removed, we will use mock data for now.
-        # You can add your standard Machine Learning model prediction logic here later.
-        mock_elevation = 1200 
-        
-        # Return the data to your frontend
-        return {
-            "status": "success",
-            "coordinates": {"lat": location.latitude, "lon": location.longitude},
-            "elevation_meters": mock_elevation,
-            "message": "Connected to backend successfully! Ready for your ML model."
-        }
-        
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_dict = json.loads(SHEETS_JSON)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        # Ensure the sheet name matches EXACTLY what is in Google Drive
+        db_sheet = client.open("Krishi-Ai-Logs").sheet1
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"⚠️ Google Sheets Error: {e}")
 
-# A simple health check endpoint
+# --- API ENDPOINTS ---
+
 @app.get("/")
-def read_root():
-    return {"message": "Baranaja AI API is up and running!"}
+def health_check():
+    return {
+        "status": "Online",
+        "ai_ready": model is not None,
+        "db_ready": db_sheet is not None
+    }
+
+@app.get("/dashboard-data")
+async def get_data(lat: float = 19.07, lon: float = 72.87):
+    # Fetch Weather
+    weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    async with httpx.AsyncClient() as client:
+        w_res = await client.get(weather_url)
+        weather = w_res.json().get("current_weather", {})
+
+    # Generate AI Advice
+    advice = "Weather data received. AI analysis pending..."
+    if model:
+        try:
+            prompt = f"Short farming advice for {weather.get('temperature')}°C."
+            res = model.generate_content(prompt)
+            advice = res.text.strip()
+        except:
+            advice = "AI busy. Check back in a moment."
+
+    # Log to Sheets
+    if db_sheet:
+        try:
+            db_sheet.append_row([str(datetime.datetime.now()), lat, lon, weather.get('temperature'), advice])
+        except:
+            print("Failed to write to sheet")
+
+    return {
+        "weather": weather,
+        "ai_advice": advice,
+        "location": {"lat": lat, "lon": lon}
+    }
